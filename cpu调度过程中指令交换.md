@@ -86,35 +86,33 @@ int main(int argc, char** argv) {
     return 0;
 }
 ```
-&nbsp;&nbsp;另外一种方式是阻止cpu换序，pthread库中提供了屏障(barrier)这种多线程并行工作的同步机制。其实pthread_join函数就是一种屏障，允许一个线程等待，直到另一个线程退出。
-&nbsp;&nbsp;pthread库中提供了pthread_barrier_init,pthread_barrier_wait,pthread_barrier_destroy这三个屏障使用的函数,调用pthread_barrier_init初始化时，需要传入count，代表在允许所有线程继续允许之前，必须到达的线程数目,调用pthread_barrier_wait的线程在屏障计数未满足条件时，会进入休眠状态。如果该线程时最后一个调用pthread_barrier_wait的线程，就满足了屏障计数，所有的线程都被唤醒，具体代码如下:
+&nbsp;&nbsp;另外一种方式是阻止cpu指令重排，阻止cpu指令重排的一种方式是使用内存屏障，X86平台上面提供了lfence，sfence，mfence指令来进行内存屏障:  
+　　1. lfence，是一种Load Barrier 读屏障。在读指令前插入读屏障，可以让高速缓存中的数据失效，重新从主内存加载数据  
+　　2. sfence, 是一种Store Barrier 写屏障。在写指令之后插入写屏障，能让写入缓存的最新数据写回到主内存  
+　　3. mfence, 是一种全能型的屏障，具备ifence和sfence的能力  
+我们这里直接使用mfence来解决指令重排的问题,代码如下:
 ```c
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
-
+#define barrier() __asm__ __volatile__("mfence": : :"memory")
 int x = 0, y = 0;
 int a = 0, b = 0;
-pthread_barrier_t barrier;
 void* thread1(void* arg) {
     x = 1;
-    pthread_barrier_wait(&barrier);
+    barrier();
     a = y;
 }
 
 void* thread2(void* arg) {
     y = 1;
-    pthread_barrier_wait(&barrier);
+    barrier();
     b = x;
 }
 
 int main(int argc, char** argv) {
     int times = 0;
-    int rc = pthread_barrier_init(&barrier, NULL, 2);
-    if (rc) {
-        fprintf(stderr, "pthread_barrier_init: %s\n", strerror(rc));
-        exit(1);
-    }
+
     for(; ;) {
         x = 0, y = 0, a = 0, b = 0;
         pthread_t tid1, tid2;
@@ -128,9 +126,25 @@ int main(int argc, char** argv) {
             break;
         }
     }
-    // pthread_barrier_destroy(&barrier);
 
     return 0;
 }
 ```
-&nbsp;&nbsp;之前有"神牛"指出由于乱序的影响，单例模式下的DCL(double checked locking)也是靠不住的，可以看下这个文章 http://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html ，其实java使用volatile即可，因为volatile就实现了jvm的内存屏障。
+
+&nbsp;&nbsp;之前有"神牛"指出由于乱序的影响，单例模式下的DCL(double checked locking)也是靠不住的，可以看下这个文章 http://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html 。其实java使用volatile即可，java的volatile在c/c++的volatile(阻止编译器优化)的基础上加了lock前缀的指令来解决指令重排的问题(没有使用fence指令是为了可移植性？大部分cpu lock指令都支持)。
+Lock前缀指令的能力：  
+　　1. 它先对总线/缓存加锁，然后执行后面的指令，最后释放锁后会把高速缓存中的脏数据全部刷新回主内存。  
+　　2. 在Lock锁住总线的时候，其他CPU的读写请求都会被阻塞，直到锁释放。Lock后的写操作会让其他CPU相关的cache line失效，从而从新从内存加载最新的数据。  
+下面是hotspot关于java volatile的部分代码  
+```c++
+inline void OrderAccess::fence() {
+  if (os::is_MP()) {
+    // always use locked addl since mfence is sometimes expensive
+#ifdef AMD64
+    __asm__ volatile ("lock; addl $0,0(%%rsp)" : : : "cc", "memory");
+#else
+    __asm__ volatile ("lock; addl $0,0(%%esp)" : : : "cc", "memory");
+#endif
+  }
+}
+```
