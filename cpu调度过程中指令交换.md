@@ -1,7 +1,8 @@
 
+
 ### 关于cpu在执行过程中为了提高效率可能交换指令的情况
 
-&nbsp; &nbsp; 最近在看《程序员的自我修养》一书，看到线程安全的部分，发现cpu在执行过程中，为了提高效率有可能交换指令的顺序，比如下面的代码:
+&nbsp; &nbsp; 最近在看《程序员的自我修养》一书，看到线程安全的部分，发现cpu在执行过程中，为了提高效率有可能会交换两个没有相关性指令的顺序，比如下面的代码:
 ```c
 #include <stdio.h>
 #include <pthread.h>
@@ -45,48 +46,7 @@ void* thread1(void* arg) {
 }
 ```
 &nbsp;&nbsp;说明了cpu在执行过程中，为了提高效率是有可能交换指令顺序的,https://hacpai.com/article/1459654970712 该篇文章详细讲了cpu在并行执行发生乱序的原因，主要是因为cpu为了提高每个周期内执行的指令数，会将两个没有关联的指令进行交换。
-&nbsp;&nbsp;该案例中一种方式是可以加锁来保障线程安全，代码如下:
-```c
-#include <stdio.h>
-#include <pthread.h>
-#include <stdlib.h>
-int x = 0, y = 0;
-int a = 0, b = 0;
-static pthread_mutex_t g_mutex_lock;
-void* thread1(void* arg) {
-    pthread_mutex_lock(&g_mutex_lock);
-    x = 1;
-    a = y;
-    pthread_mutex_unlock(&g_mutex_lock);
-}
-
-void* thread2(void* arg) {
-    pthread_mutex_lock(&g_mutex_lock);
-    y = 1;
-    b = x;
-    pthread_mutex_unlock(&g_mutex_lock);
-}
-
-int main(int argc, char** argv) {
-    int times = 0;
-    pthread_mutex_init(&g_mutex_lock, NULL);
-    for(; ;) {
-        x = 0, y = 0, a = 0, b = 0;
-        pthread_t tid1, tid2; 
-        pthread_create(&tid1, NULL, (void *)thread1, NULL);
-        pthread_create(&tid2, NULL, (void *)thread2, NULL);
-        pthread_join(tid1, NULL);
-        pthread_join(tid2, NULL);
-        times++;
-        if (a==0 && b==0) {
-            printf("a=%d, b=%d times=%d\n", a, b, times);
-            break;
-        }
-    }
-    return 0;
-}
-```
-&nbsp;&nbsp;另外一种方式是阻止cpu指令重排，阻止cpu指令重排的一种方式是使用内存屏障，X86平台上面提供了lfence，sfence，mfence指令来进行内存屏障:  
+&nbsp;&nbsp;这里我们可以阻止cpu进行指令重排，阻止cpu指令重排的一种方式是使用内存屏障，X86平台上面提供了lfence，sfence，mfence指令来进行内存屏障:  
 　　1. lfence，是一种Load Barrier 读屏障。在读指令前插入读屏障，可以让高速缓存中的数据失效，重新从主内存加载数据  
 　　2. sfence, 是一种Store Barrier 写屏障。在写指令之后插入写屏障，能让写入缓存的最新数据写回到主内存  
 　　3. mfence, 是一种全能型的屏障，具备ifence和sfence的能力  
@@ -136,7 +96,7 @@ Lock前缀指令的能力：
 　　1. 它先对总线/缓存加锁，然后执行后面的指令，最后释放锁后会把高速缓存中的脏数据全部刷新回主内存。  
 　　2. 在Lock锁住总线的时候，其他CPU的读写请求都会被阻塞，直到锁释放。Lock后的写操作会让其他CPU相关的cache line失效，从而从新从内存加载最新的数据。  
 下面是hotspot关于java volatile的部分代码  
-```c++
+```cpp
 inline void OrderAccess::fence() {
   if (os::is_MP()) {
     // always use locked addl since mfence is sometimes expensive
